@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Haelt jeden Commit auf, der etwas anderes mitbringt als die erlaubten
+# Dateien - oder etwas, das aus einer echten Umgebung stammt. Dieses Repo ist
+# oeffentlich; was hier einmal liegt, liegt fuer immer im Verlauf.
+# Einschalten: git config core.hooksPath .githooks
+
+ERLAUBT="Export-ProxmoxInventar.sh README.md SHA256SUMS LICENSE .gitignore .githooks/pre-commit"
+FEHLER=0
+
+while IFS= read -r datei; do
+  [ -n "$datei" ] || continue
+  case " $ERLAUBT " in
+    *" $datei "*) ;;
+    *) printf 'Gehoert nicht in dieses Repo: %s\n' "$datei" >&2; FEHLER=1 ;;
+  esac
+done < <(git diff --cached --name-only)
+
+# Groesse: das Skript ist ein paar Dutzend KB. Alles Groessere ist ein Versehen.
+while IFS= read -r datei; do
+  [ -f "$datei" ] || continue
+  groesse=$(wc -c < "$datei" | tr -d ' ')
+  if [ "$groesse" -gt 262144 ]; then
+    printf 'Zu gross fuer dieses Repo (%s Bytes): %s\n' "$groesse" "$datei" >&2
+    FEHLER=1
+  fi
+done < <(git diff --cached --name-only)
+
+# Adressen aus privaten Netzen stammen aus einer echten Umgebung und haben
+# hier nichts zu suchen. 192.0.2.x ist der Dokumentationsbereich aus RFC 5737
+# und darum erlaubt.
+if git diff --cached -U0 \
+   | grep -E '^\+' \
+   | grep -vE '192\.0\.2\.' \
+   | grep -qE '(^|[^0-9.])(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)[0-9]+\.[0-9]+'; then
+  printf 'Sieht nach einer echten IP-Adresse aus. Dieses Repo ist oeffentlich.\n' >&2
+  FEHLER=1
+fi
+
+if [ "$FEHLER" -ne 0 ]; then
+  printf '\nDieses Repo traegt genau ein Skript und nichts sonst.\n' >&2
+  exit 1
+fi
+exit 0

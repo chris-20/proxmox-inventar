@@ -1,0 +1,11 @@
+# Dieses Repo traegt genau ein Skript. Grundregel: alles ist verboten,
+# einzeln erlaubt wird nur, was hierher gehoert. So faengt schon ein
+# `git add .` nichts Fremdes ein.
+*
+!.gitignore
+!README.md
+!SHA256SUMS
+!LICENSE
+!Export-ProxmoxInventar.sh
+!.githooks/
+!.githooks/pre-commit
