@@ -15,7 +15,7 @@ set -u
 LC_ALL=C
 export LC_ALL
 
-VERSION=1.0.9
+VERSION=1.1.0
 
 PVESH=${PVESH:-pvesh}
 DMIDECODE=${DMIDECODE:-dmidecode}
@@ -120,7 +120,16 @@ schritt() {
 # Ein manipuliertes oder halb editiertes Skript laeuft gar nicht erst an.
 selftest_source() {
   local quelle=$1 fund muster
+  # Ein unlesbarer Quelltext ist kein sauberer Quelltext: grep gibt dann leer und
+  # Exitcode 2 zurueck, und der Waechter meldete "sauber", ohne etwas gesehen zu haben.
+  if [ ! -r "$quelle" ]; then
+    printf 'Selbsttest: eigener Quelltext nicht lesbar (%s)\n' "$quelle" >&2
+    return 1
+  fi
   muster='pvesh[[:space:]]+(set|create|delete|push)'
+  # Auch ueber die Variable: das Skript ruft "$PVESH" auf, nicht pvesh.
+  muster="$muster"'|\$\{?PVESH\}?"?[[:space:]]+(set|create|delete|push)'
+  muster="$muster"'|\$\{?DMIDECODE\}?"?[[:space:]]+(--dump|--dump-bin)'
   muster="$muster"'|(^|[^a-z])(qm|pct)[[:space:]]+(set|start|stop|destroy|shutdown|reset)'
   muster="$muster"'|agent[[:space:]]+exec'
   muster="$muster"'|(^|[^a-z_-])(ssh|scp|curl|wget|nc)[[:space:]]'
@@ -140,7 +149,7 @@ selftest_source() {
 run_limited() {
   local secs=$1; shift
   local pid wpid rc
-  "$@" >"$TMP_DIR/out" 2>"$TMP_DIR/err" &
+  "$@" >"$TMP_DIR/out" 2>"$TMP_DIR/err" </dev/null &
   pid=$!
   # Die Umleitung ist nicht kosmetisch: ohne sie erbt der Waechter die
   # Ausgabe-Pipe einer Kommandosubstitution wie $(dmi ...). Die wartet dann
@@ -425,7 +434,7 @@ schreibe_host() {
         cpu="$cpu, $kerne Kerne"
       fi
     fi
-    cpu="$cpu, $threads Threads"
+    [ -n "$threads" ] && cpu="$cpu, $threads Threads"
   fi
   [ -n "$modell" ]  || notiere_luecke "/nodes/$node/status" "Feld cpuinfo.model fehlt"
   [ -n "$threads" ] || notiere_luecke "/nodes/$node/status" "Feld cpuinfo.cpus fehlt"
@@ -470,24 +479,28 @@ schreibe_host() {
   fi
 
   schritt "Cluster"
-  api "/cluster/status"
+  # Was nicht gelesen wurde, wird auch nicht behauptet: eine unlesbare Abfrage
+  # machte aus einem Cluster sonst einen "Einzelnode, 0 VMs, 0 LXC". Die Luecke
+  # steht dank api() ohnehin im Bericht.
+  local cluster_gelesen=1 gaeste_gelesen=1
+  api "/cluster/status" || cluster_gelesen=0
   local cluster; cluster=$(jrows name type < "$TMP_DIR/out" \
                            | awk -F'\t' '$2=="cluster" {print $1; exit}')
   ANZ_NODES=$(jrows type < "$TMP_DIR/out" | awk '$1=="node"' | wc -l | tr -d ' ')
 
   local anzahl_vm anzahl_lxc
-  api "/cluster/resources" --type vm
+  api "/cluster/resources" --type vm || gaeste_gelesen=0
   anzahl_vm=$(jrows node type < "$TMP_DIR/out" \
               | awk -F'\t' -v n="$node" '$1==n && $2=="qemu"' | wc -l | tr -d ' ')
   anzahl_lxc=$(jrows node type < "$TMP_DIR/out" \
                | awk -F'\t' -v n="$node" '$1==n && $2=="lxc"' | wc -l | tr -d ' ')
   # Ein Einzelnode hat keinen Eintrag mit type=cluster - dann stuende dort
   # "Cluster ," mit leerem Namen.
-  if [ -n "$cluster" ]; then
-    rollen="Hypervisor, Cluster $cluster, $anzahl_vm VMs, $anzahl_lxc LXC"
-  else
-    rollen="Hypervisor, Einzelnode, $anzahl_vm VMs, $anzahl_lxc LXC"
+  rollen="Hypervisor"
+  if [ "$cluster_gelesen" -eq 1 ]; then
+    if [ -n "$cluster" ]; then rollen="$rollen, Cluster $cluster"; else rollen="$rollen, Einzelnode"; fi
   fi
+  [ "$gaeste_gelesen" -eq 1 ] && rollen="$rollen, $anzahl_vm VMs, $anzahl_lxc LXC"
 
   notizen="Platten: ${platten%; }"
   # Kein ZFS heisst nicht zwingend Hardware-RAID - die alte Formulierung
@@ -675,7 +688,11 @@ schreibe_vms() {
 
     # Rollen: Tags und erste Zeile der Beschreibung. Mehr weiss Proxmox nicht.
     local erste_zeile rollen
-    erste_zeile=$(printf '%s' "$desc" | sed 's/\\n.*//')
+    # Nur an einem ECHTEN Umbruch schneiden: in der maskierten Fassung steckt in
+    # "C:\\new" ebenfalls ein "\\n". Eine gerade Zahl Backslashes davor heisst
+    # "das n gehoert zum Text". \\r faellt mit weg, sonst bliebe bei CRLF ein
+    # nacktes Wagenruecklauf-Zeichen im Feld stehen.
+    erste_zeile=$(printf '%s' "$desc" | "$PERL" -pe 's/^((?:[^\\]|\\\\)*)\\[nr].*/$1/s')
     rollen=$(printf '%s' "$tags" | tr ';' ',')
     if [ -n "$rollen" ] && [ -n "$erste_zeile" ]; then
       rollen="$rollen - $erste_zeile"
@@ -755,7 +772,9 @@ schreibe_vms() {
       if agent_an "$agent"; then notiz="$notiz, Agent ja"
       else notiz="$notiz, Agent nein"; fi
     fi
-    speicher=$(jrows scsi0 rootfs < "$TMP_DIR/config.json" | head -1 \
+    # Eine VM kann an virtio0, sata0 oder ide0 haengen statt an scsi0 - ohne die
+    # bekaeme sie gar keine Speicher-Notiz.
+    speicher=$(jrows scsi0 virtio0 sata0 ide0 rootfs < "$TMP_DIR/config.json" | head -1 \
                | tr '\t' '\n' | grep -v '^$' | head -1 | cut -d: -f1)
     [ -n "$speicher" ] && notiz="$notiz, Speicher $speicher"
     [ -n "$notiz_extra" ] && notiz="$notiz, $notiz_extra"
@@ -771,7 +790,12 @@ schreibe_vms() {
 # darum nie eine halbe CSV zurueck.
 lege_ab() {
   [ -e "$2" ] && die "$2 gibt es schon. Das Werkzeug ueberschreibt nichts - erst wegraeumen."
+  # Liegt das Ziel auf einem anderen Dateisystem (--ziel /mnt/pve/...), ist mv
+  # Kopieren plus Loeschen. Ein Strg-C genau in diesem Fenster laesst eine halbe
+  # CSV liegen, waehrend abbruch() "Es wurde nichts geschrieben" meldet.
+  trap '' INT TERM
   mv "$1" "$2" || die "konnte $2 nicht ablegen"
+  trap abbruch INT TERM
   printf 'geschrieben: %s\n' "$2"
 }
 
@@ -876,7 +900,15 @@ main() {
       --nur-vms)       NUR_VMS=1 ;;
       --ohne-agent)    OHNE_AGENT=1 ;;
       --fortschritt)   shift; FORTSCHRITT=${1:-auto} ;;
-      --timeout)       shift; API_TIMEOUT=${1:-5}; AGENT_TIMEOUT=$API_TIMEOUT ;;
+      --timeout)
+        shift
+        # Ungeprueft scheitert erst sleep im Waechter: dann laeuft jede Abfrage in
+        # die Zeitschranke und es entstuenden zwei CSVs voller leerer Felder.
+        case ${1:-} in
+          ''|*[!0-9]*|0) die "--timeout braucht eine ganze Zahl groesser 0, bekommen: '${1:-}'" ;;
+        esac
+        API_TIMEOUT=$1; AGENT_TIMEOUT=$API_TIMEOUT
+        ;;
       --hilfe|-h)      hilfe; exit 0 ;;
       # vor der PVE-Pruefung: die Version muss auch auf dem Mac abfragbar sein
       --version)       printf 'Export-ProxmoxInventar.sh %s\n' "$VERSION"; exit 0 ;;
@@ -891,6 +923,12 @@ main() {
     esac
     shift
   done
+
+  # Zusammen schliessen sich die beiden aus: es entstuende keine Datei, ohne
+  # dass jemand einen Grund zu sehen bekaeme.
+  if [ "$NUR_HOSTS" -eq 1 ] && [ "$NUR_VMS" -eq 1 ]; then
+    die "--nur-hosts und --nur-vms zusammen ergeben keine Datei. Eines von beiden waehlen oder keines."
+  fi
 
   [ -d "$PVE_DIR" ] || die "kein Proxmox-Node - $PVE_DIR fehlt. Das Skript gehoert auf einen PVE-Node."
 

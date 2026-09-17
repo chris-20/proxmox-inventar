@@ -71,7 +71,7 @@ mkdir -p ~/inventar && cd ~/inventar
 
 wget -q --https-only \
   -O Export-ProxmoxInventar.sh \
-  https://github.com/chris-20/proxmox-inventar/releases/download/v1.0.9/Export-ProxmoxInventar.sh
+  https://github.com/chris-20/proxmox-inventar/releases/download/v1.1.0/Export-ProxmoxInventar.sh
 
 sha256sum Export-ProxmoxInventar.sh    # gegen den Wert, den du dir notiert hast
 
